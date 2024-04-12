@@ -37,6 +37,7 @@ class DatasetType(Enum):
     AUDIO = "audio"
     MUSIC = "music"
     SOUND = "sound"
+    AUDIOVIDEO = "audiovideo"
 
 
 def get_solver(cfg: omegaconf.DictConfig) -> StandardSolver:
@@ -286,7 +287,7 @@ def get_chroma_cosine_similarity(cfg: omegaconf.DictConfig) -> metrics.ChromaCos
 
 
 def get_audio_datasets(cfg: omegaconf.DictConfig,
-                       dataset_type: DatasetType = DatasetType.AUDIO) -> tp.Dict[str, torch.utils.data.DataLoader]:
+                       dataset_type: DatasetType = DatasetType.AUDIOVIDEO) -> tp.Dict[str, torch.utils.data.DataLoader]:
     """Build AudioDataset from configuration.
 
     Args:
@@ -306,6 +307,8 @@ def get_audio_datasets(cfg: omegaconf.DictConfig,
     assert cfg.dataset is not None, "Could not find dataset definition in config"
 
     dataset_cfg = dict_from_config(cfg.dataset)
+
+    ## 4 splits are expected in the config:
     splits_cfg: dict = {}
     splits_cfg['train'] = dataset_cfg.pop('train')
     splits_cfg['valid'] = dataset_cfg.pop('valid')
@@ -314,52 +317,43 @@ def get_audio_datasets(cfg: omegaconf.DictConfig,
     execute_only_stage = cfg.get('execute_only', None)
 
     for split, path in cfg.datasource.items():
+        
         if not isinstance(path, str):
             continue  # skipping this as not a path
         if execute_only_stage is not None and split != execute_only_stage:
             continue
-        logger.info(f"Loading audio data split {split}: {str(path)}")
-        assert (
-            cfg.sample_rate <= max_sample_rate
-        ), f"Expecting a max sample rate of {max_sample_rate} for datasource but {sample_rate} found."
-        assert (
-            cfg.channels <= max_channels
-        ), f"Expecting a max number of channels of {max_channels} for datasource but {channels} found."
+        
+        logger.info(f"Preparing {split} dataloader for media data from: {path}")
+        split_cfg = splits_cfg.get(split, {})
+        kwargs = {**dataset_cfg, **split_cfg}  # Merge default config with split-specific config
+        kwargs.update(sample_rate=sample_rate, channels=channels)
 
-        split_cfg = splits_cfg[split]
-        split_kwargs = {k: v for k, v in split_cfg.items()}
-        kwargs = {**dataset_cfg, **split_kwargs}  # split kwargs overrides default dataset_cfg
-        kwargs['sample_rate'] = sample_rate
-        kwargs['channels'] = channels
-
+        # Calculate the number of samples if permutation on files is enabled
         if kwargs.get('permutation_on_files') and cfg.optim.updates_per_epoch:
-            kwargs['num_samples'] = (
-                flashy.distrib.world_size() * cfg.dataset.batch_size * cfg.optim.updates_per_epoch)
+            kwargs['num_samples'] = cfg.optim.updates_per_epoch * cfg.dataset.batch_size * flashy.distrib.world_size()
 
+        # Extract specific arguments for DataLoader construction
         num_samples = kwargs['num_samples']
         shuffle = kwargs['shuffle']
-
-        return_info = kwargs.pop('return_info')
+        return_info = kwargs.pop('return_info', False)
         batch_size = kwargs.pop('batch_size', None)
-        num_workers = kwargs.pop('num_workers')
+        num_workers = kwargs.pop('num_workers', None)
 
-        if dataset_type == DatasetType.MUSIC:
-            dataset = data.music_dataset.MusicDataset.from_meta(path, **kwargs)
-        elif dataset_type == DatasetType.SOUND:
-            dataset = data.sound_dataset.SoundDataset.from_meta(path, **kwargs)
-        elif dataset_type == DatasetType.AUDIO:
-            dataset = data.info_audio_dataset.InfoAudioDataset.from_meta(path, return_info=return_info, **kwargs)
+        # Select the appropriate dataset class based on the type
+        if dataset_type == DatasetType.MEDIA:
+            dataset = data.media_dataset.MediaDataset.from_meta(path, return_info=return_info, **kwargs)
         else:
-            raise ValueError(f"Dataset type is unsupported: {dataset_type}")
+            raise ValueError(f"Unsupported dataset type: {dataset_type}")
 
-        loader = get_loader(
+        # Use a custom collater if return_info is True, otherwise default to None
+        collater = dataset.collater if return_info else None
+
+        loader = torch.utils.data.DataLoader(
             dataset,
-            num_samples,
             batch_size=batch_size,
             num_workers=num_workers,
-            seed=seed,
-            collate_fn=dataset.collater if return_info else None,
             shuffle=shuffle,
+            collate_fn=collater
         )
         dataloaders[split] = loader
 
