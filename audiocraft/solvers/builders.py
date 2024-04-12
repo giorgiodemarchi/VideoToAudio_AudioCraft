@@ -341,7 +341,7 @@ def get_audio_datasets(cfg: omegaconf.DictConfig,
 
         # Select the appropriate dataset class based on the type
         if dataset_type == DatasetType.AUDIOVIDEO:
-            dataset = data.media_dataset.MediaDataset.from_meta(path, return_info=return_info, **kwargs)
+            dataset = data.audio_video_dataset.AudioVideoDataset.from_meta(path, return_info=return_info, **kwargs)
         else:
             raise ValueError(f"Unsupported dataset type: {dataset_type}")
 
