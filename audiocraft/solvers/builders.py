@@ -317,7 +317,7 @@ def get_audio_datasets(cfg: omegaconf.DictConfig,
     execute_only_stage = cfg.get('execute_only', None)
 
     for split, path in cfg.datasource.items():
-        
+
         if not isinstance(path, str):
             continue  # skipping this as not a path
         if execute_only_stage is not None and split != execute_only_stage:
@@ -340,7 +340,7 @@ def get_audio_datasets(cfg: omegaconf.DictConfig,
         num_workers = kwargs.pop('num_workers', None)
 
         # Select the appropriate dataset class based on the type
-        if dataset_type == DatasetType.MEDIA:
+        if dataset_type == DatasetType.AUDIOVIDEO:
             dataset = data.media_dataset.MediaDataset.from_meta(path, return_info=return_info, **kwargs)
         else:
             raise ValueError(f"Unsupported dataset type: {dataset_type}")
