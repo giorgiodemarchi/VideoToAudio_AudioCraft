@@ -291,9 +291,13 @@ def get_audio_datasets(cfg: omegaconf.DictConfig,
 
     Args:
         cfg (omegaconf.DictConfig): Configuration.
-        dataset_type: The type of dataset to create.
+        dataset_type: The type of dataset to create. 
     Returns:
         dict[str, torch.utils.data.DataLoader]: Map of dataloader for each data split.
+
+    Changes required:
+    - DatasetType should be VIDEOAUDIO
+    
     """
     dataloaders: dict = {}
 
