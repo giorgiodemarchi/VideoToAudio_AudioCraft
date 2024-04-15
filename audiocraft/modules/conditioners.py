@@ -60,6 +60,11 @@ class JointEmbedCondition(tp.NamedTuple):
     path: tp.List[tp.Optional[str]] = []
     seek_time: tp.List[tp.Optional[float]] = []
 
+class VideoCondition(tp.NamedTuple):
+    video: torch.Tensor
+    fps: tp.List[int]
+    path: tp.List[tp.Optional[str]] = []
+
 
 # They skipped the TextCondition definition becuase simple, see below
 ################
@@ -86,19 +91,25 @@ class ConditioningAttributes:
     def joint_embed_attributes(self):
         return self.joint_embed.keys()
 
+    @property 
+    def video_attributes(self):
+        return self.video.keys()
+
     @property
     def attributes(self):
         return {
             "text": self.text_attributes,
             "wav": self.wav_attributes,
             "joint_embed": self.joint_embed_attributes,
+            "video": self.video_attributes
         }
 
     def to_flat_dict(self):
         return {
             **{f"text.{k}": v for k, v in self.text.items()},
             **{f"wav.{k}": v for k, v in self.wav.items()},
-            **{f"joint_embed.{k}": v for k, v in self.joint_embed.items()}
+            **{f"joint_embed.{k}": v for k, v in self.joint_embed.items()},
+            **{f"video.{k}": v for k, v in self.video.items()}
         }
 
     @classmethod
@@ -108,7 +119,6 @@ class ConditioningAttributes:
             kind, att = k.split(".")
             out[kind][att] = v
         return out
-
 
 class SegmentWithAttributes(SegmentInfo):
     """Base class for all dataclasses that are used for conditioning.
@@ -1211,6 +1221,7 @@ class ConditioningProvider(nn.Module):
         self.device = device
         self.conditioners = nn.ModuleDict(conditioners)
 
+    ### Joint embedd
     @property
     def joint_embed_conditions(self):
         return [m.attribute for m in self.conditioners.values() if isinstance(m, JointEmbeddingConditioner)]
@@ -1218,11 +1229,15 @@ class ConditioningProvider(nn.Module):
     @property
     def has_joint_embed_conditions(self):
         return len(self.joint_embed_conditions) > 0
+    ######
 
+    ### Text 
     @property
     def text_conditions(self):
         return [k for k, v in self.conditioners.items() if isinstance(v, TextConditioner)]
+    #####
 
+    ### WAV 
     @property
     def wav_conditions(self):
         return [k for k, v in self.conditioners.items() if isinstance(v, WaveformConditioner)]
@@ -1230,6 +1245,16 @@ class ConditioningProvider(nn.Module):
     @property
     def has_wav_condition(self):
         return len(self.wav_conditions) > 0
+    ######
+    
+    ### Video 
+    @property
+    def video_conditions(self):
+        """
+        Added for video condition
+        """
+        return [k for k, v in self.conditioners.items() if isinstance(v, VideoConditioner)]
+    ######
 
     def tokenize(self, inputs: tp.List[ConditioningAttributes]) -> tp.Dict[str, tp.Any]:
         """Match attributes/wavs with existing conditioners in self, and compute tokenize them accordingly.
@@ -1246,18 +1271,22 @@ class ConditioningProvider(nn.Module):
         )
 
         output = {}
+        ## Before this point, the conditioning atrtibutes look like [see _collate_text notes example]
         text = self._collate_text(inputs)
         wavs = self._collate_wavs(inputs)
         joint_embeds = self._collate_joint_embeds(inputs)
 
-        assert set(text.keys() | wavs.keys() | joint_embeds.keys()).issubset(set(self.conditioners.keys())), (
+        video = self._collate_video(inputs)
+
+        assert set(text.keys() | wavs.keys() | joint_embeds.keys() | video.keys()).issubset(set(self.conditioners.keys())), (
             f"Got an unexpected attribute! Expected {self.conditioners.keys()}, ",
-            f"got {text.keys(), wavs.keys(), joint_embeds.keys()}"
+            f"got {text.keys(), wavs.keys(), joint_embeds.keys(), video.keys()}"
         )
 
-        for attribute, batch in chain(text.items(), wavs.items(), joint_embeds.items()):
+        for attribute, batch in chain(text.items(), wavs.items(), joint_embeds.items(), video.items()):
             output[attribute] = self.conditioners[attribute].tokenize(batch)
         return output
+    
 
     def forward(self, tokenized: tp.Dict[str, tp.Any]) -> tp.Dict[str, ConditionType]:
         """Compute pairs of `(embedding, mask)` using the configured conditioners and the tokenized representations.
@@ -1276,6 +1305,29 @@ class ConditioningProvider(nn.Module):
             condition, mask = self.conditioners[attribute](inputs)
             output[attribute] = (condition, mask)
         return output
+    
+    def _collate_video(self, samples: tp.List[ConditioningAttributes]) -> tp.Dict[str, VideoCondition]:
+        """Given a list of ConditioningAttributes objects, compile a dictionary where the keys
+        are the attributes and the values are the aggregated input per attribute.
+        For example:
+        Input:
+        [
+            ConditioningAttributes(text={"genre": "Rock", "description": "A rock song with a guitar solo"}, wav=...),
+            ConditioningAttributes(text={"genre": "Hip-hop", "description": "A hip-hop verse"}, wav=...),
+        ]
+        Output:
+        {
+            "genre": ["Rock", "Hip-hop"],
+            "description": ["A rock song with a guitar solo", "A hip-hop verse"]
+        }
+
+        Args:
+            samples (list of ConditioningAttributes): List of ConditioningAttributes samples.
+        Returns:
+            dict[str, list[str, optional]]: A dictionary mapping an attribute name to text batch.
+        """
+
+        pass
 
     def _collate_text(self, samples: tp.List[ConditioningAttributes]) -> tp.Dict[str, tp.List[tp.Optional[str]]]:
         """Given a list of ConditioningAttributes objects, compile a dictionary where the keys
