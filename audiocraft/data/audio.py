@@ -117,14 +117,14 @@ def _av_read(filepath: tp.Union[str, Path], seek_time: float = 0, duration: floa
 def _av_read_from_s3(filepath: tp.Union[str, Path], bucket_name: str, seek_time: float = 0, duration: float = -1.) -> tp.Tuple[torch.Tensor, int]:
     """
     Adapted version that reads from S3. Everything else is equal to above.
-
+    This actually extracts the audio from the video. 
     """
     _init_av()
     file_key = filepath
     file_stream = fetch_from_s3(bucket_name, file_key)  # Defined in aws_utils
     
     with av.open(file_stream) as container:
-        stream = container.streams.audio[0]
+        stream = container.streams.audio[0]  ## Extracts audio
         sr = stream.codec_context.sample_rate
         num_frames = int(sr * duration) if duration >= 0 else -1
         frame_offset = int(sr * seek_time)
@@ -270,15 +270,3 @@ def audio_write(stem_name: tp.Union[str, Path],
         raise
     return path
 
-def extract_audio_from_video(video_path):
-    container = av.open(video_path)
-    audio_stream = next(s for s in container.streams if s.type == 'audio')
-    out_audio, sample_rate = [], None
-
-    for frame in container.decode(audio_stream):
-        audio_frame = frame.to_ndarray()
-        out_audio.append(audio_frame)
-        sample_rate = frame.sample_rate
-
-    audio_data = np.concatenate(out_audio, axis=1)
-    return audio_data, sample_rate
