@@ -47,7 +47,7 @@ class AudioInfo(SegmentWithAttributes):  ## Basically it is AudioInfo(SegmentInf
     audio_tokens: tp.Optional[torch.Tensor] = None  # populated when using cached batch for training a LM.
 
     def to_condition_attributes(self) -> ConditioningAttributes:
-        return ConditioningAttributes()
+        return ConditioningAttributes()  # Returns initialized with default values
 
 
 class InfoAudioDataset(AudioDataset):

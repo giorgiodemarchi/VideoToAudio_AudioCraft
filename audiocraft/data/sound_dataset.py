@@ -38,6 +38,8 @@ class SoundInfo(SegmentWithAttributes):
     description: tp.Optional[str] = None
     self_wav: tp.Optional[torch.Tensor] = None
 
+    video_path: tp.Optional[str] = None
+
     @property
     def has_sound_meta(self) -> bool:
         return self.description is not None
@@ -49,8 +51,13 @@ class SoundInfo(SegmentWithAttributes):
             key, value = _field.name, getattr(self, _field.name)
             if key == 'self_wav':
                 out.wav[key] = value
+
+            elif key == 'video_path':
+                out.video[key] = value
+            
             else:
                 out.text[key] = value
+
         return out
 
     @staticmethod
