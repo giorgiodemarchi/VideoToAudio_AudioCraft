@@ -547,7 +547,7 @@ class AudioDataset:
             else:
                 raise ValueError("Don't know where to read metadata from in the dir. "
                                  "Expecting either a data.jsonl or data.jsonl.gz file but none found.")
-        meta = load_audio_meta(root)
+        meta = load_audio_meta(root, resolve=False)
         return cls(meta, **kwargs)
 
     @classmethod
