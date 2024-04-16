@@ -23,6 +23,7 @@ import av
 import subprocess as sp
 
 from .audio_utils import f32_pcm, normalize_audio
+from .aws_utils import fetch_from_s3
 
 
 _av_initialized = False
@@ -112,8 +113,42 @@ def _av_read(filepath: tp.Union[str, Path], seek_time: float = 0, duration: floa
             wav = wav[:, :num_frames]
         return f32_pcm(wav), sr
 
+###### READ FROM S3
+def _av_read_from_s3(filepath: tp.Union[str, Path], bucket_name: str, seek_time: float = 0, duration: float = -1.) -> tp.Tuple[torch.Tensor, int]:
+    """
+    Adapted version that reads from S3. Everything else is equal to above.
 
-def audio_read(filepath: tp.Union[str, Path], seek_time: float = 0.,
+    """
+    _init_av()
+    file_key = filepath
+    file_stream = fetch_from_s3(bucket_name, file_key)  # Defined in aws_utils
+    
+    with av.open(file_stream) as container:
+        stream = container.streams.audio[0]
+        sr = stream.codec_context.sample_rate
+        num_frames = int(sr * duration) if duration >= 0 else -1
+        frame_offset = int(sr * seek_time)
+        container.seek(int(max(0, (seek_time - 0.1)) / stream.time_base), stream=stream)
+        frames = []
+        length = 0
+        for frame in container.decode(stream):
+            current_offset = int(frame.rate * frame.pts * frame.time_base)
+            strip = max(0, frame_offset - current_offset)
+            buf = torch.from_numpy(frame.to_ndarray())
+            if buf.shape[0] != stream.channels:
+                buf = buf.view(-1, stream.channels).t()
+            buf = buf[:, strip:]
+            frames.append(buf)
+            length += buf.shape[1]
+            if num_frames > 0 and length >= num_frames:
+                break
+        assert frames
+        wav = torch.cat(frames, dim=1)
+        if num_frames > 0:
+            wav = wav[:, :num_frames]
+        return wav, sr
+
+def audio_read(filepath: tp.Union[str, Path], bucket_name: str, seek_time: float = 0.,
                duration: float = -1., pad: bool = False) -> tp.Tuple[torch.Tensor, int]:
     """Read audio by picking the most appropriate backend tool based on the audio format.
 
@@ -122,6 +157,9 @@ def audio_read(filepath: tp.Union[str, Path], seek_time: float = 0.,
         seek_time (float): Time at which to start reading in the file.
         duration (float): Duration to read from the file. If set to -1, the whole file is read.
         pad (bool): Pad output audio if not reaching expected duration.
+
+        ADDED:
+        bucket_name
     Returns:
         tuple of torch.Tensor, int: Tuple containing audio data and sample rate.
     """
@@ -137,7 +175,9 @@ def audio_read(filepath: tp.Union[str, Path], seek_time: float = 0.,
         if len(wav.shape) == 1:
             wav = torch.unsqueeze(wav, 0)
     else:
-        wav, sr = _av_read(filepath, seek_time, duration)
+        # wav, sr = _av_read(filepath, seek_time, duration)
+        wav, sr = _av_read_from_s3(filepath, bucket_name, seek_time, duration)
+
     if pad and duration > 0:
         expected_frames = int(duration * sr)
         wav = F.pad(wav, (0, expected_frames - wav.shape[-1]))
@@ -229,3 +269,16 @@ def audio_write(stem_name: tp.Union[str, Path],
             path.unlink()
         raise
     return path
+
+def extract_audio_from_video(video_path):
+    container = av.open(video_path)
+    audio_stream = next(s for s in container.streams if s.type == 'audio')
+    out_audio, sample_rate = [], None
+
+    for frame in container.decode(audio_stream):
+        audio_frame = frame.to_ndarray()
+        out_audio.append(audio_frame)
+        sample_rate = frame.sample_rate
+
+    audio_data = np.concatenate(out_audio, axis=1)
+    return audio_data, sample_rate
