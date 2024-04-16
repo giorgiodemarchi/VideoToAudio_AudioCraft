@@ -51,7 +51,6 @@ class WavCondition(tp.NamedTuple):
     path: tp.List[tp.Optional[str]] = []
     seek_time: tp.List[tp.Optional[float]] = []
 
-
 class JointEmbedCondition(tp.NamedTuple):
     wav: torch.Tensor
     text: tp.List[tp.Optional[str]]
@@ -71,10 +70,10 @@ class VideoCondition(tp.NamedTuple):
 ############### CONDITIONING ATTRIBUTES CLASS: NEEDS CHANGES #############
 @dataclass
 class ConditioningAttributes:
-    ############### NEED TO MODIFY: Add video
     text: tp.Dict[str, tp.Optional[str]] = field(default_factory=dict)
     wav: tp.Dict[str, WavCondition] = field(default_factory=dict)
     joint_embed: tp.Dict[str, JointEmbedCondition] = field(default_factory=dict)
+    video: tp.Dict[str, VideoCondition] = field(default_factory=dict)
 
     def __getitem__(self, item):
         return getattr(self, item)
@@ -1014,6 +1013,7 @@ class CLAPEmbeddingConditioner(JointEmbeddingConditioner):
 
 class VideoConditioner(BaseConditioner):
     ...
+
 class ImageBindConditioner(VideoConditioner):
     """
     Conditioning with ImageBind model
@@ -1024,14 +1024,17 @@ class ImageBindConditioner(VideoConditioner):
         :param output_dim: Dimension of the output 
         The base conditioner creates a linear projection layer:
         self.output_proj = nn.Linear(dim, output_dim)
-
-
         """
         super().__init__(model_dim, output_dim)
         pass 
 
     def tokenize(self, x: tp.List[tp.Optional[str]]) -> tp.Dict[str, torch.Tensor]:
         """
+        Input:
+        - x: List of N (N=batch size) paths to video (needs to read video from S3) 
+
+        Output:
+        - Dict of embeddings
         Here, call the model and return embeddings
         """
         pass
@@ -1283,8 +1286,11 @@ class ConditioningProvider(nn.Module):
             f"got {text.keys(), wavs.keys(), joint_embeds.keys(), video.keys()}"
         )
 
+
+        ## Here, it simply calls the tokenize method in the Conditioner class
         for attribute, batch in chain(text.items(), wavs.items(), joint_embeds.items(), video.items()):
             output[attribute] = self.conditioners[attribute].tokenize(batch)
+
         return output
     
 
@@ -1327,6 +1333,7 @@ class ConditioningProvider(nn.Module):
             dict[str, list[str, optional]]: A dictionary mapping an attribute name to text batch.
         """
 
+        ################# IMPLEMENT THIS
         pass
 
     def _collate_text(self, samples: tp.List[ConditioningAttributes]) -> tp.Dict[str, tp.List[tp.Optional[str]]]:

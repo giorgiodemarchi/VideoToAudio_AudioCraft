@@ -4,8 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 """Base classes for the datasets that also provide non-audio metadata,
-e.g. description, text transcription etc.
-"""
+e.g. description, text transcription etc."""
 from dataclasses import dataclass
 import logging
 import math
@@ -36,7 +35,7 @@ def clusterify_all_meta(meta: tp.List[AudioMeta]) -> tp.List[AudioMeta]:
 
 
 @dataclass
-class AudioInfo(SegmentWithAttributes):
+class AudioInfo(SegmentWithAttributes):  ## Basically it is AudioInfo(SegmentInfo)
     """Dummy SegmentInfo with empty attributes.
 
     The InfoAudioDataset is expected to return metadata that inherits

@@ -14,6 +14,9 @@ fuser:
   cross: [description]
   input_interpolate: []
 
+
+### Here, we will need to modify to add video conditioner model 
+# This config file is 
 conditioners:
   description:
     model: t5
