@@ -7,7 +7,7 @@
 defaults:
   - audiogen/default
   - /model: lm/audiogen_lm
-  - override /dset: audio/default
+  - override /dset: audio/audioset-adorno
   - _self_
 
 autocast: true
