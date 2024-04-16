@@ -16,6 +16,15 @@ import re
 import typing as tp
 import warnings
 
+import boto3
+import os
+import numpy as np
+import av
+from io import BytesIO
+from imagebind.data import transform_and_sample_video_tensor
+from imagebind.models import imagebind_model
+from imagebind.models.imagebind_model import ModalityType
+
 import einops
 from num2words import num2words
 import spacy
@@ -39,11 +48,15 @@ from ..utils.utils import collate, hash_trick, length_to_mask, load_clap_state_d
 
 
 logger = logging.getLogger(__name__)
-TextCondition = tp.Optional[str]  # a text condition can be a string or None (if doesn't exist)
+
 ConditionType = tp.Tuple[torch.Tensor, torch.Tensor]  # condition, mask
 
 
 ##### CONDITION DEFINITION
+VideoCondition = tp.Optional[str] # A VIDEO CONDITION IS THE PATH TO THE VIDEO (SAME AS THE AUDIO)
+
+TextCondition = tp.Optional[str]  # a text condition can be a string or None (if doesn't exist)
+
 class WavCondition(tp.NamedTuple):
     wav: torch.Tensor
     length: torch.Tensor
@@ -59,10 +72,8 @@ class JointEmbedCondition(tp.NamedTuple):
     path: tp.List[tp.Optional[str]] = []
     seek_time: tp.List[tp.Optional[float]] = []
 
-class VideoCondition(tp.NamedTuple):
-    video: torch.Tensor
-    fps: tp.List[int]
-    path: tp.List[tp.Optional[str]] = []
+# class VideoCondition(tp.NamedTuple):
+#     path: tp.Optional[str]
 
 
 # They skipped the TextCondition definition becuase simple, see below
@@ -70,10 +81,17 @@ class VideoCondition(tp.NamedTuple):
 ############### CONDITIONING ATTRIBUTES CLASS: NEEDS CHANGES #############
 @dataclass
 class ConditioningAttributes:
+    """
+    Example: ConditioningAttributes(text={"genre": "Rock", "description": "A rock song with a guitar solo"}, wav=...)
+
+    We want:
+    ConditioningAttributes(video={"video_path": "original_train/..."}, wav=...)
+    """
     text: tp.Dict[str, tp.Optional[str]] = field(default_factory=dict)
     wav: tp.Dict[str, WavCondition] = field(default_factory=dict)
     joint_embed: tp.Dict[str, JointEmbedCondition] = field(default_factory=dict)
-    video: tp.Dict[str, VideoCondition] = field(default_factory=dict)
+
+    video: tp.Dict[str, tp.Optional[str]] = field(default_factory=dict)
 
     def __getitem__(self, item):
         return getattr(self, item)
@@ -1026,10 +1044,13 @@ class ImageBindConditioner(VideoConditioner):
         self.output_proj = nn.Linear(dim, output_dim)
         """
         super().__init__(model_dim, output_dim)
-        pass 
+        self.s3_client = boto3.client('s3', aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'], aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY'])
+        self.model = imagebind_model.imagebind_huge(pretrained=True).to(self.device)
+        self.model.eval()
 
     def tokenize(self, x: tp.List[tp.Optional[str]]) -> tp.Dict[str, torch.Tensor]:
         """
+        This method is required for conditioning. However, for video conditioned there's not tokenization step. I replace it with reading from S3 and returning a torch tensor
         Input:
         - x: List of N (N=batch size) paths to video (needs to read video from S3) 
 
@@ -1037,7 +1058,23 @@ class ImageBindConditioner(VideoConditioner):
         - Dict of embeddings
         Here, call the model and return embeddings
         """
-        pass
+
+        video_tensors = []
+        for video_key in x:
+            obj = self.s3_client.get_object(Bucket=os.environ['BUCKET_NAME'], Key=video_key)
+            video_data = obj['Body'].read()
+            container = av.open(BytesIO(video_data))
+            frames = []
+            for frame in frames:
+                img = frame.to_image()
+                tensor = torch.tensor(np.array(img))
+                frames.append(tensor)
+
+            video_tensor = torch.stack(frames, dim=0)  # Size: (frames, H, W, 3)
+            video_tensors.append(video_tensor)
+
+        return video_tensors
+
 
     def forward(self, inputs: tp.Any) -> ConditionType:
         """Gets input that should be used as conditioning (e.g, genre, description or a waveform).
@@ -1052,7 +1089,18 @@ class ImageBindConditioner(VideoConditioner):
                 ---- Defined at the beginning of this file as:
                 ConditionType = tp.Tuple[torch.Tensor, torch.Tensor]  # condition, mask
         """
-        pass 
+
+        transformed_videos = [transform_and_sample_video_tensor(input, device=self.device, clips_per_video=1) for input in inputs]
+        
+        model_inputs = {ModalityType.VISION: transformed_videos}
+
+        with torch.no_grad():
+            embeddings = self.model(model_inputs)
+
+        embeddings_videos = embeddings['vision']
+
+        return embeddings_videos
+
 
 class TimeSformerConditioner(VideoConditioner):
     """
@@ -1279,7 +1327,7 @@ class ConditioningProvider(nn.Module):
         wavs = self._collate_wavs(inputs)
         joint_embeds = self._collate_joint_embeds(inputs)
 
-        video = self._collate_video(inputs)
+        video = self._collate_video(inputs) ## Now video is a dict {'video_path': path}
 
         assert set(text.keys() | wavs.keys() | joint_embeds.keys() | video.keys()).issubset(set(self.conditioners.keys())), (
             f"Got an unexpected attribute! Expected {self.conditioners.keys()}, ",
@@ -1334,7 +1382,12 @@ class ConditioningProvider(nn.Module):
         """
 
         ################# IMPLEMENT THIS
-        pass
+        out: tp.Dict[str, tp.List[tp.Optional[str]]] = defaultdict(list)
+        videos = [x.video for x in samples]
+        for video in videos:
+            for condition in self.video_conditions:
+                out[condition].append(video[condition])
+        return out
 
     def _collate_text(self, samples: tp.List[ConditioningAttributes]) -> tp.Dict[str, tp.List[tp.Optional[str]]]:
         """Given a list of ConditioningAttributes objects, compile a dictionary where the keys
