@@ -1,8 +1,8 @@
 # @package __global__
-
+## This file defines the LM model configs for audiogen
 defaults:
   - lm/default
-  - override /conditioner: text2sound
+  - override /conditioner: text2sound    
   - override /model/lm/model_scale: small # prefer this group to set model scale instead of transformer_lm keys directly
 
 lm_model: transformer_lm

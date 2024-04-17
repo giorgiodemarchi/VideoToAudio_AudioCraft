@@ -21,3 +21,6 @@ gradio
 torchmetrics
 encodec
 protobuf
+
+torchvision
+boto3

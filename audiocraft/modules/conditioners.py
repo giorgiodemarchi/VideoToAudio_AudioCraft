@@ -16,6 +16,15 @@ import re
 import typing as tp
 import warnings
 
+import boto3
+import os
+import numpy as np
+import av
+from io import BytesIO
+from imagebind.data import transform_and_sample_video_tensor
+from imagebind.models import imagebind_model
+from imagebind.models.imagebind_model import ModalityType
+
 import einops
 from num2words import num2words
 import spacy
@@ -39,9 +48,14 @@ from ..utils.utils import collate, hash_trick, length_to_mask, load_clap_state_d
 
 
 logger = logging.getLogger(__name__)
-TextCondition = tp.Optional[str]  # a text condition can be a string or None (if doesn't exist)
+
 ConditionType = tp.Tuple[torch.Tensor, torch.Tensor]  # condition, mask
 
+
+##### CONDITION DEFINITION
+VideoCondition = tp.Optional[str] # A VIDEO CONDITION IS THE PATH TO THE VIDEO (SAME AS THE AUDIO)
+
+TextCondition = tp.Optional[str]  # a text condition can be a string or None (if doesn't exist)
 
 class WavCondition(tp.NamedTuple):
     wav: torch.Tensor
@@ -49,7 +63,6 @@ class WavCondition(tp.NamedTuple):
     sample_rate: tp.List[int]
     path: tp.List[tp.Optional[str]] = []
     seek_time: tp.List[tp.Optional[float]] = []
-
 
 class JointEmbedCondition(tp.NamedTuple):
     wav: torch.Tensor
@@ -59,12 +72,26 @@ class JointEmbedCondition(tp.NamedTuple):
     path: tp.List[tp.Optional[str]] = []
     seek_time: tp.List[tp.Optional[float]] = []
 
+# class VideoCondition(tp.NamedTuple):
+#     path: tp.Optional[str]
 
+
+# They skipped the TextCondition definition becuase simple, see below
+################
+############### CONDITIONING ATTRIBUTES CLASS: NEEDS CHANGES #############
 @dataclass
 class ConditioningAttributes:
+    """
+    Example: ConditioningAttributes(text={"genre": "Rock", "description": "A rock song with a guitar solo"}, wav=...)
+
+    We want:
+    ConditioningAttributes(video={"video_path": "original_train/..."}, wav=...)
+    """
     text: tp.Dict[str, tp.Optional[str]] = field(default_factory=dict)
     wav: tp.Dict[str, WavCondition] = field(default_factory=dict)
     joint_embed: tp.Dict[str, JointEmbedCondition] = field(default_factory=dict)
+
+    video: tp.Dict[str, tp.Optional[str]] = field(default_factory=dict)
 
     def __getitem__(self, item):
         return getattr(self, item)
@@ -81,19 +108,25 @@ class ConditioningAttributes:
     def joint_embed_attributes(self):
         return self.joint_embed.keys()
 
+    @property 
+    def video_attributes(self):
+        return self.video.keys()
+
     @property
     def attributes(self):
         return {
             "text": self.text_attributes,
             "wav": self.wav_attributes,
             "joint_embed": self.joint_embed_attributes,
+            "video": self.video_attributes
         }
 
     def to_flat_dict(self):
         return {
             **{f"text.{k}": v for k, v in self.text.items()},
             **{f"wav.{k}": v for k, v in self.wav.items()},
-            **{f"joint_embed.{k}": v for k, v in self.joint_embed.items()}
+            **{f"joint_embed.{k}": v for k, v in self.joint_embed.items()},
+            **{f"video.{k}": v for k, v in self.video.items()}
         }
 
     @classmethod
@@ -104,16 +137,16 @@ class ConditioningAttributes:
             out[kind][att] = v
         return out
 
-
 class SegmentWithAttributes(SegmentInfo):
     """Base class for all dataclasses that are used for conditioning.
     All child classes should implement `to_condition_attributes` that converts
     the existing attributes to a dataclass of type ConditioningAttributes.
     """
     def to_condition_attributes(self) -> ConditioningAttributes:
+        # Raises error only if it was not overwritten by children class
         raise NotImplementedError()
 
-
+###### [DON'T TOUCH THIS] IMPORTANT #######
 def nullify_condition(condition: ConditionType, dim: int = 1):
     """Transform an input condition to a null condition.
     The way it is done by converting it to a single zero vector similarly
@@ -139,8 +172,9 @@ def nullify_condition(condition: ConditionType, dim: int = 1):
     mask = torch.zeros((B, 1), device=out.device).int()
     assert cond.dim() == out.dim()
     return out, mask
-
-
+###############
+ 
+######### USELESS things ############
 def nullify_wav(cond: WavCondition) -> WavCondition:
     """Transform a WavCondition to a nullified WavCondition.
     It replaces the wav by a null tensor, forces its length to 0, and replaces metadata by dummy attributes.
@@ -159,7 +193,6 @@ def nullify_wav(cond: WavCondition) -> WavCondition:
         seek_time=[None] * cond.wav.shape[0],
     )
 
-
 def nullify_joint_embed(embed: JointEmbedCondition) -> JointEmbedCondition:
     """Nullify the joint embedding condition by replacing it by a null tensor, forcing its length to 0,
     and replacing metadata by dummy attributes.
@@ -176,14 +209,12 @@ def nullify_joint_embed(embed: JointEmbedCondition) -> JointEmbedCondition:
         seek_time=[0] * embed.wav.shape[0],
     )
 
-
 class Tokenizer:
     """Base tokenizer implementation
     (in case we want to introduce more advances tokenizers in the future).
     """
     def __call__(self, texts: tp.List[tp.Optional[str]]) -> tp.Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError()
-
 
 class WhiteSpaceTokenizer(Tokenizer):
     """This tokenizer should be used for natural language descriptions.
@@ -252,7 +283,6 @@ class WhiteSpaceTokenizer(Tokenizer):
             return padded_output, mask, texts  # type: ignore
         return padded_output, mask
 
-
 class NoopTokenizer(Tokenizer):
     """This tokenizer should be used for global conditioners such as: artist, genre, key, etc.
     The difference between this and WhiteSpaceTokenizer is that NoopTokenizer does not split
@@ -281,8 +311,10 @@ class NoopTokenizer(Tokenizer):
         tokens = torch.LongTensor(output).unsqueeze(1)
         mask = length_to_mask(torch.IntTensor(lengths)).int()
         return tokens, mask
+############################
 
-
+#########################################################
+########## CONDITIONERS DEFINITIONS! BASE: ###############
 class BaseConditioner(nn.Module):
     """Base model for all conditioner modules.
     We allow the output dim to be different than the hidden dim for two reasons:
@@ -318,12 +350,11 @@ class BaseConditioner(nn.Module):
                 - And a mask indicating where the padding tokens.
         """
         raise NotImplementedError()
+#################
 
-
+############## [DON'T TOUCH] TEXT CONDITIONER #######################
 class TextConditioner(BaseConditioner):
     ...
-
-
 class LUTConditioner(TextConditioner):
     """Lookup table TextConditioner.
 
@@ -357,7 +388,6 @@ class LUTConditioner(TextConditioner):
         embeds = self.output_proj(embeds)
         embeds = (embeds * mask.unsqueeze(-1))
         return embeds, mask
-
 
 class T5Conditioner(TextConditioner):
     """T5-based TextConditioner.
@@ -453,8 +483,9 @@ class T5Conditioner(TextConditioner):
         embeds = self.output_proj(embeds.to(self.output_proj.weight))
         embeds = (embeds * mask.unsqueeze(-1))
         return embeds, mask
+###############################################
 
-
+############# [DON'T TOUCH] WAVEFORM CONDITIONER ################
 class WaveformConditioner(BaseConditioner):
     """Base class for all conditioners that take a waveform as input.
     Classes that inherit must implement `_get_wav_embedding` that outputs
@@ -505,7 +536,6 @@ class WaveformConditioner(BaseConditioner):
             mask = torch.ones_like(embeds[..., 0])
         embeds = (embeds * mask.unsqueeze(-1))
         return embeds, mask
-
 
 class ChromaStemConditioner(WaveformConditioner):
     """Chroma conditioner based on stems.
@@ -696,8 +726,9 @@ class ChromaStemConditioner(WaveformConditioner):
             paths = [Path(p) for p in x.path if p is not None]
             self.cache.populate_embed_cache(paths, x)
         return x
+###############################################
 
-
+############ [DON'T TOUCH] JOINT EMBEDDING CONDITIONER (AUDIO + TEXT) #############
 class JointEmbeddingConditioner(BaseConditioner):
     """Joint embedding conditioning supporting both audio or text conditioning.
 
@@ -757,7 +788,6 @@ class JointEmbeddingConditioner(BaseConditioner):
 
     def tokenize(self, x: JointEmbedCondition) -> JointEmbedCondition:
         return x
-
 
 class CLAPEmbeddingConditioner(JointEmbeddingConditioner):
     """Joint Embedding conditioner based on pre-trained CLAP model.
@@ -994,8 +1024,112 @@ class CLAPEmbeddingConditioner(JointEmbeddingConditioner):
             embed = self._get_text_embedding(x)
             empty_idx = torch.LongTensor([i for i, xi in enumerate(x.text) if xi is None or xi == ""])
         return embed, empty_idx
+#################################################################
+
+############### VIDEO CONDITIONERS ###############
+# Here is where we'll define the methods to extract video features from ImageBind
+
+class VideoConditioner(BaseConditioner):
+    ...
+
+class ImageBindConditioner(VideoConditioner):
+    """
+    Conditioning with ImageBind model
+    """
+    def __init__(self, model_dim: int, output_dim: int):
+        """
+        :param model_dim: Dimension of the model
+        :param output_dim: Dimension of the output 
+        The base conditioner creates a linear projection layer:
+        self.output_proj = nn.Linear(dim, output_dim)
+        """
+        super().__init__(model_dim, output_dim)
+        self.s3_client = boto3.client('s3', aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'], aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY'])
+        self.model = imagebind_model.imagebind_huge(pretrained=True).to(self.device)
+        self.model.eval()
+
+    def tokenize(self, x: tp.List[tp.Optional[str]]) -> tp.Dict[str, torch.Tensor]:
+        """
+        This method is required for conditioning. However, for video conditioned there's not tokenization step. I replace it with reading from S3 and returning a torch tensor
+        Input:
+        - x: List of N (N=batch size) paths to video (needs to read video from S3) 
+
+        Output:
+        - Dict of embeddings
+        Here, call the model and return embeddings
+        """
+
+        video_tensors = []
+        for video_key in x:
+            obj = self.s3_client.get_object(Bucket=os.environ['BUCKET_NAME'], Key=video_key)
+            video_data = obj['Body'].read()
+            container = av.open(BytesIO(video_data))
+            frames = []
+            for frame in frames:
+                img = frame.to_image()
+                tensor = torch.tensor(np.array(img))
+                frames.append(tensor)
+
+            video_tensor = torch.stack(frames, dim=0)  # Size: (frames, H, W, 3)
+            video_tensors.append(video_tensor)
+
+        return video_tensors
 
 
+    def forward(self, inputs: tp.Any) -> ConditionType:
+        """Gets input that should be used as conditioning (e.g, genre, description or a waveform).
+        Outputs a ConditionType, after the input data was embedded as a dense vector.
+
+        Returns:
+            ConditionType:
+                - A tensor of size [B, T, D] where B is the batch size, T is the length of the
+                  output embedding and D is the dimension of the embedding.
+                - And a mask indicating where the padding tokens. (meaning unclear, but it's a vector of zeros and ones, where zeros is for non meaningful tokens)
+                    in T5 conditioning, this is the attention mask inputs['attention_mask']
+                ---- Defined at the beginning of this file as:
+                ConditionType = tp.Tuple[torch.Tensor, torch.Tensor]  # condition, mask
+        """
+
+        transformed_videos = [transform_and_sample_video_tensor(input, device=self.device, clips_per_video=1) for input in inputs]
+        
+        model_inputs = {ModalityType.VISION: transformed_videos}
+
+        with torch.no_grad():
+            embeddings = self.model(model_inputs)
+
+        embeddings_videos = embeddings['vision']
+
+        return embeddings_videos
+
+
+class TimeSformerConditioner(VideoConditioner):
+    """
+    Conditioning with TimeSformer model
+    """
+    def __init__(self, model_dim: int, output_dim: int):
+        """
+        :param model_dim: Dimension of the model
+        :param output_dim: Dimension of the output 
+        The base conditioner creates a linear projection layer:
+        self.output_proj = nn.Linear(dim, output_dim)
+
+
+        """
+        super().__init__(model_dim, output_dim)
+        pass 
+
+    def tokenize(self, x: tp.List[tp.Optional[str]]) -> tp.Dict[str, torch.Tensor]:
+        """
+        Here, call the model and return embeddings
+        """
+        pass
+
+    def forward(self, inputs: tp.Any) -> ConditionType:
+        pass 
+
+#################################################
+
+####### DROPOUT ##########
 def dropout_condition(sample: ConditioningAttributes, condition_type: str, condition: str) -> ConditioningAttributes:
     """Utility function for nullifying an attribute inside an ConditioningAttributes object.
     If the condition is of type "wav", then nullify it using `nullify_condition` function.
@@ -1026,14 +1160,12 @@ def dropout_condition(sample: ConditioningAttributes, condition_type: str, condi
 
     return sample
 
-
 class DropoutModule(nn.Module):
     """Base module for all dropout modules."""
     def __init__(self, seed: int = 1234):
         super().__init__()
         self.rng = torch.Generator()
         self.rng.manual_seed(seed)
-
 
 class AttributeDropout(DropoutModule):
     """Dropout with a given probability per attribute.
@@ -1081,7 +1213,6 @@ class AttributeDropout(DropoutModule):
     def __repr__(self):
         return f"AttributeDropout({dict(self.p)})"
 
-
 class ClassifierFreeGuidanceDropout(DropoutModule):
     """Classifier Free Guidance dropout.
     All attributes are dropped with the same probability.
@@ -1119,8 +1250,9 @@ class ClassifierFreeGuidanceDropout(DropoutModule):
 
     def __repr__(self):
         return f"ClassifierFreeGuidanceDropout(p={self.p})"
+#######################
 
-
+########## CORE: CONDITIONING PROVIDER AND CONDITIONING FUSER (see docs)#########
 class ConditioningProvider(nn.Module):
     """Prepare and provide conditions given all the supported conditioners.
 
@@ -1129,10 +1261,18 @@ class ConditioningProvider(nn.Module):
         device (torch.device or str, optional): Device for conditioners and output condition types.
     """
     def __init__(self, conditioners: tp.Dict[str, BaseConditioner], device: tp.Union[torch.device, str] = "cpu"):
+        """
+        :param conditioners: Dictionary of conditioners
+            Example: {'video': VideoConditioner(), 'audio': AudioConditioner()}
+            this is created in builders/get_conditioning_provider based on config
+
+        :param device: Device for conditioners and output condition types
+        """
         super().__init__()
         self.device = device
         self.conditioners = nn.ModuleDict(conditioners)
 
+    ### Joint embedd
     @property
     def joint_embed_conditions(self):
         return [m.attribute for m in self.conditioners.values() if isinstance(m, JointEmbeddingConditioner)]
@@ -1140,11 +1280,15 @@ class ConditioningProvider(nn.Module):
     @property
     def has_joint_embed_conditions(self):
         return len(self.joint_embed_conditions) > 0
+    ######
 
+    ### Text 
     @property
     def text_conditions(self):
         return [k for k, v in self.conditioners.items() if isinstance(v, TextConditioner)]
+    #####
 
+    ### WAV 
     @property
     def wav_conditions(self):
         return [k for k, v in self.conditioners.items() if isinstance(v, WaveformConditioner)]
@@ -1152,6 +1296,16 @@ class ConditioningProvider(nn.Module):
     @property
     def has_wav_condition(self):
         return len(self.wav_conditions) > 0
+    ######
+    
+    ### Video 
+    @property
+    def video_conditions(self):
+        """
+        Added for video condition
+        """
+        return [k for k, v in self.conditioners.items() if isinstance(v, VideoConditioner)]
+    ######
 
     def tokenize(self, inputs: tp.List[ConditioningAttributes]) -> tp.Dict[str, tp.Any]:
         """Match attributes/wavs with existing conditioners in self, and compute tokenize them accordingly.
@@ -1168,18 +1322,25 @@ class ConditioningProvider(nn.Module):
         )
 
         output = {}
+        ## Before this point, the conditioning atrtibutes look like [see _collate_text notes example]
         text = self._collate_text(inputs)
         wavs = self._collate_wavs(inputs)
         joint_embeds = self._collate_joint_embeds(inputs)
 
-        assert set(text.keys() | wavs.keys() | joint_embeds.keys()).issubset(set(self.conditioners.keys())), (
+        video = self._collate_video(inputs) ## Now video is a dict {'video_path': path}
+
+        assert set(text.keys() | wavs.keys() | joint_embeds.keys() | video.keys()).issubset(set(self.conditioners.keys())), (
             f"Got an unexpected attribute! Expected {self.conditioners.keys()}, ",
-            f"got {text.keys(), wavs.keys(), joint_embeds.keys()}"
+            f"got {text.keys(), wavs.keys(), joint_embeds.keys(), video.keys()}"
         )
 
-        for attribute, batch in chain(text.items(), wavs.items(), joint_embeds.items()):
+
+        ## Here, it simply calls the tokenize method in the Conditioner class
+        for attribute, batch in chain(text.items(), wavs.items(), joint_embeds.items(), video.items()):
             output[attribute] = self.conditioners[attribute].tokenize(batch)
+
         return output
+    
 
     def forward(self, tokenized: tp.Dict[str, tp.Any]) -> tp.Dict[str, ConditionType]:
         """Compute pairs of `(embedding, mask)` using the configured conditioners and the tokenized representations.
@@ -1198,6 +1359,35 @@ class ConditioningProvider(nn.Module):
             condition, mask = self.conditioners[attribute](inputs)
             output[attribute] = (condition, mask)
         return output
+    
+    def _collate_video(self, samples: tp.List[ConditioningAttributes]) -> tp.Dict[str, VideoCondition]:
+        """Given a list of ConditioningAttributes objects, compile a dictionary where the keys
+        are the attributes and the values are the aggregated input per attribute.
+        For example:
+        Input:
+        [
+            ConditioningAttributes(text={"genre": "Rock", "description": "A rock song with a guitar solo"}, wav=...),
+            ConditioningAttributes(text={"genre": "Hip-hop", "description": "A hip-hop verse"}, wav=...),
+        ]
+        Output:
+        {
+            "genre": ["Rock", "Hip-hop"],
+            "description": ["A rock song with a guitar solo", "A hip-hop verse"]
+        }
+
+        Args:
+            samples (list of ConditioningAttributes): List of ConditioningAttributes samples.
+        Returns:
+            dict[str, list[str, optional]]: A dictionary mapping an attribute name to text batch.
+        """
+
+        ################# IMPLEMENT THIS
+        out: tp.Dict[str, tp.List[tp.Optional[str]]] = defaultdict(list)
+        videos = [x.video for x in samples]
+        for video in videos:
+            for condition in self.video_conditions:
+                out[condition].append(video[condition])
+        return out
 
     def _collate_text(self, samples: tp.List[ConditioningAttributes]) -> tp.Dict[str, tp.List[tp.Optional[str]]]:
         """Given a list of ConditioningAttributes objects, compile a dictionary where the keys
@@ -1323,7 +1513,6 @@ class ConditioningProvider(nn.Module):
 
         return out
 
-
 class ConditionFuser(StreamingModule):
     """Condition fuser handles the logic to combine the different conditions
     to the actual model input.
@@ -1414,3 +1603,5 @@ class ConditionFuser(StreamingModule):
             self._streaming_state['offsets'] = offsets + T
 
         return input, cross_attention_output
+
+##################

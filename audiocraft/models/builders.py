@@ -3,12 +3,10 @@
 #
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-
 """
 All the functions to build the relevant models and modules
 from the Hydra config.
 """
-
 import typing as tp
 
 import audiocraft
@@ -51,7 +49,6 @@ def get_quantizer(quantizer: str, cfg: omegaconf.DictConfig, dimension: int) -> 
         kwargs['dimension'] = dimension
     return klass(**kwargs)
 
-
 def get_encodec_autoencoder(encoder_name: str, cfg: omegaconf.DictConfig):
     if encoder_name == 'seanet':
         kwargs = dict_from_config(getattr(cfg, 'seanet'))
@@ -64,7 +61,6 @@ def get_encodec_autoencoder(encoder_name: str, cfg: omegaconf.DictConfig):
         return encoder, decoder
     else:
         raise KeyError(f"Unexpected compression model {cfg.compression_model}")
-
 
 def get_compression_model(cfg: omegaconf.DictConfig) -> CompressionModel:
     """Instantiate a compression model."""
@@ -83,7 +79,7 @@ def get_compression_model(cfg: omegaconf.DictConfig) -> CompressionModel:
     else:
         raise KeyError(f"Unexpected compression model {cfg.compression_model}")
 
-
+################## LM MODEL #############################
 def get_lm_model(cfg: omegaconf.DictConfig) -> LMModel:
     """Instantiate a transformer LM."""
     if cfg.lm_model in ['transformer_lm', 'transformer_lm_magnet']:
@@ -120,12 +116,15 @@ def get_lm_model(cfg: omegaconf.DictConfig) -> LMModel:
         ).to(cfg.device)
     else:
         raise KeyError(f"Unexpected LM model {cfg.lm_model}")
+########################################################
 
-
+#############################################################
+################ [NEEDS CHANGE] CONDITIONING MODELS #######################
 def get_conditioner_provider(output_dim: int, cfg: omegaconf.DictConfig) -> ConditioningProvider:
     """Instantiate a conditioning model."""
     device = cfg.device
     duration = cfg.dataset.segment_duration
+    ### Here it is setting config as "conditioners configs"
     cfg = getattr(cfg, 'conditioners')
     dict_cfg = {} if cfg is None else dict_from_config(cfg)
     conditioners: tp.Dict[str, BaseConditioner] = {}
@@ -153,11 +152,31 @@ def get_conditioner_provider(output_dim: int, cfg: omegaconf.DictConfig) -> Cond
                 device=device,
                 **model_args
             )
+        elif model_type == 'imagebind':
+            ###############
+            # conditioners[str(cond)] = ImageBindConditioner(  # Need to import it from conditioners
+            #     output_dim=output_dim,
+            #     device=device,
+            #     **model_args
+            # )
+            ###############
+            pass
+
+        elif model_type == 'timesformer':
+            #############
+            # conditioners[str(cond)] = ImageBindConditioner(  # Need to import it from conditioners
+            #     output_dim=output_dim,
+            #     device=device,
+            #     **model_args
+            # )
+            ###############
+            pass
         else:
             raise ValueError(f"Unrecognized conditioning model: {model_type}")
+       
+
     conditioner = ConditioningProvider(conditioners, device=device, **condition_provider_args)
     return conditioner
-
 
 def get_condition_fuser(cfg: omegaconf.DictConfig) -> ConditionFuser:
     """Instantiate a condition fuser object."""
@@ -167,7 +186,7 @@ def get_condition_fuser(cfg: omegaconf.DictConfig) -> ConditionFuser:
     kwargs = {k: v for k, v in fuser_cfg.items() if k not in fuser_methods}
     fuser = ConditionFuser(fuse2cond=fuse2cond, **kwargs)
     return fuser
-
+##############################################################
 
 def get_codebooks_pattern_provider(n_q: int, cfg: omegaconf.DictConfig) -> CodebooksPatternProvider:
     """Instantiate a codebooks pattern provider object."""

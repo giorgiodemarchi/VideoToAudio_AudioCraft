@@ -17,10 +17,11 @@ autocast_dtype: float16
 # with a total stride of 320 leading to 50 frames/s.
 # rvq.n_q=4, rvq.bins=2048, no quantization dropout
 # (transformer_lm card and n_q must be compatible)
-compression_model_checkpoint: //reference/bd44a852/checkpoint.th
+# compression_model_checkpoint: //reference/bd44a852/checkpoint.th
+compression_model_checkpoint: //pretrained/facebook/encodec_32khz
 
 channels: 1
-sample_rate: 16000
+sample_rate: 32000
 
 deadlock:
   use: true  # deadlock detection

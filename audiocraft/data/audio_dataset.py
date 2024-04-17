@@ -297,7 +297,7 @@ class AudioDataset:
                  segment_duration: tp.Optional[float] = None,
                  shuffle: bool = True,
                  num_samples: int = 10_000,
-                 sample_rate: int = 48_000,
+                 sample_rate: int = 48_000,  ### This is not exactly true (44100?)
                  channels: int = 2,
                  pad: bool = True,
                  sample_on_duration: bool = True,
@@ -347,6 +347,10 @@ class AudioDataset:
             assert not self.sample_on_weight
             assert self.shuffle
 
+        ####
+        self.bucket_name = 'audioset-adorno'
+        ###
+
     def start_epoch(self, epoch: int):
         self.current_epoch = epoch
 
@@ -379,7 +383,7 @@ class AudioDataset:
 
     def sample_file(self, index: int, rng: torch.Generator) -> AudioMeta:
         """Sample a given file from `self.meta`. Can be overridden in subclasses.
-        This is only called if `segment_duration` is not None.
+        ---->This is only called if `segment_duration` is not None.
 
         You must use the provided random number generator `rng` for reproducibility.
         You can further make use of the index accessed.
@@ -404,16 +408,20 @@ class AudioDataset:
     def _audio_read(self, path: str, seek_time: float = 0, duration: float = -1):
         # Override this method in subclass if needed.
         if self.load_wav:
-            return audio_read(path, seek_time, duration, pad=False)
+            return audio_read(path, self.bucket_name, seek_time, duration, pad=False) ###### TODO: Add read from S3
         else:
             assert self.segment_duration is not None
             n_frames = int(self.sample_rate * self.segment_duration)
             return torch.zeros(self.channels, n_frames), self.sample_rate
 
     def __getitem__(self, index: int) -> tp.Union[torch.Tensor, tp.Tuple[torch.Tensor, SegmentInfo]]:
+        """
+        TODO: Add download from S3
+        """
         if self.segment_duration is None:
+            ## For now only this cas
             file_meta = self.meta[index]
-            out, sr = audio_read(file_meta.path)
+            out, sr = audio_read(file_meta.path, self.bucket_name)
             out = convert_audio(out, sr, self.sample_rate, self.channels)
             n_frames = out.shape[-1]
             segment_info = SegmentInfo(file_meta, seek_time=0., n_frames=n_frames, total_frames=n_frames,
@@ -520,6 +528,8 @@ class AudioDataset:
             logging.warning(msg)
         return meta
 
+
+    ######## IMPORTANT: This is called to instantiate the dataset
     @classmethod
     def from_meta(cls, root: tp.Union[str, Path], **kwargs):
         """Instantiate AudioDataset from a path to a directory containing a manifest as a jsonl file.
@@ -537,7 +547,7 @@ class AudioDataset:
             else:
                 raise ValueError("Don't know where to read metadata from in the dir. "
                                  "Expecting either a data.jsonl or data.jsonl.gz file but none found.")
-        meta = load_audio_meta(root)
+        meta = load_audio_meta(root, resolve=False)
         return cls(meta, **kwargs)
 
     @classmethod

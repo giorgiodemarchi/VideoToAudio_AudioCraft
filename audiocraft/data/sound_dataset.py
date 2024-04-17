@@ -37,6 +37,7 @@ class SoundInfo(SegmentWithAttributes):
     """
     description: tp.Optional[str] = None
     self_wav: tp.Optional[torch.Tensor] = None
+    video_path: tp.Optional[str] = None
 
     @property
     def has_sound_meta(self) -> bool:
@@ -49,8 +50,13 @@ class SoundInfo(SegmentWithAttributes):
             key, value = _field.name, getattr(self, _field.name)
             if key == 'self_wav':
                 out.wav[key] = value
+
+            elif key == 'video_path':
+                out.video[key] = value
+            
             else:
                 out.text[key] = value
+
         return out
 
     @staticmethod
@@ -142,17 +148,22 @@ class SoundDataset(InfoAudioDataset):
     def __getitem__(self, index):
         wav, info = super().__getitem__(index)
         info_data = info.to_dict()
-        info_path = self._get_info_path(info.meta.path)
-        if Path(info_path).exists():
-            with open(info_path, 'r') as json_file:
-                sound_data = json.load(json_file)
-                sound_data.update(info_data)
-                sound_info = SoundInfo.from_dict(sound_data, fields_required=self.info_fields_required)
-                # if there are multiple descriptions, sample one randomly
-                if isinstance(sound_info.description, list):
-                    sound_info.description = random.choice(sound_info.description)
-        else:
-            sound_info = SoundInfo.from_dict(info_data, fields_required=False)
+
+        info_data['video_path'] = info_data['meta'].path
+        sound_info = SoundInfo.from_dict(info_data, fields_required=False)
+
+
+        # info_path = self._get_info_path(info.meta.path)
+        # if Path(info_path).exists():
+        #     with open(info_path, 'r') as json_file:
+        #         sound_data = json.load(json_file)
+        #         sound_data.update(info_data)
+        #         sound_info = SoundInfo.from_dict(sound_data, fields_required=self.info_fields_required)
+        #         # if there are multiple descriptions, sample one randomly
+        #         if isinstance(sound_info.description, list):
+        #             sound_info.description = random.choice(sound_info.description)
+        # else:
+        #     sound_info = SoundInfo.from_dict(info_data, fields_required=False)
 
         sound_info.self_wav = WavCondition(
             wav=wav[None], length=torch.tensor([info.n_frames]),

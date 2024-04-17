@@ -1,0 +1,9 @@
+# AudioCaps dataset
+datasource:
+  max_sample_rate: 32000 ## ???
+  max_channels: 1
+
+  train: egs/data_train.jsonl  # only evaluation set
+  valid: egs/data_train.jsonl  # only evaluation set
+  evaluate: egs/data_train.jsonl
+  generate: egs/data_train.jsonl # identical to evaluate

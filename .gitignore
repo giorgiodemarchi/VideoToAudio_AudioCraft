@@ -49,6 +49,7 @@ ENV/
 # egs with manifest files
 egs/*
 !egs/example
+!egs/data_train.jsonl
 # local datasets
 dataset/*
 !dataset/example
