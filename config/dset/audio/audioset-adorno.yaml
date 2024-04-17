@@ -1,6 +1,6 @@
 # AudioCaps dataset
 datasource:
-  max_sample_rate: 16000 ## ???
+  max_sample_rate: 32000 ## ???
   max_channels: 1
 
   train: egs/data_train.jsonl  # only evaluation set
